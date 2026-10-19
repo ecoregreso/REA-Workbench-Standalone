@@ -1,0 +1,38 @@
+{
+  "name": "rea-workbench-monorepo",
+  "version": "0.2.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Standalone local REA desktop analysis workbench",
+  "type": "module",
+  "workspaces": [
+    "standalone"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "start": "node scripts/start.mjs",
+    "package:linux": "npm run build && npm run package:linux -w @rea-workbench/standalone",
+    "package:win": "npm run build && npm run package:win -w @rea-workbench/standalone",
+    "package:mac": "npm run build && npm run package:mac -w @rea-workbench/standalone",
+    "typecheck": "tsc --noEmit",
+    "pretest": "node scripts/build-shared.mjs",
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "check:release": "node scripts/check-release.mjs",
+    "export:public": "node scripts/export-public.mjs"
+  },
+  "devDependencies": {
+    "electron": "44.0.0",
+    "electron-builder": "26.0.12",
+    "esbuild": "0.28.2",
+    "vite": "8.0.16",
+    "typescript": "5.9.3",
+    "@types/react": "18.3.26",
+    "@types/react-dom": "18.3.7",
+    "@types/node": "22.19.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

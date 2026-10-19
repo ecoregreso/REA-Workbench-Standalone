@@ -1,0 +1,9 @@
+node_modules/
+standalone/dist/
+release/
+*.log
+shared/dist/
+brief.md
+qa/
+standalone/qa-main.cjs
+eval_*.md

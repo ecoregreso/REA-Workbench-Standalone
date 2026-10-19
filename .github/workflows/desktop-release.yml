@@ -1,0 +1,239 @@
+name: Desktop release candidates
+
+on:
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: Require publisher signing for Windows and signing plus notarization for macOS
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    name: ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x64
+            runner: ubuntu-24.04
+            script: package:linux
+            unsigned_args: --config.forceCodeSigning=false
+          - platform: win
+            arch: x64
+            runner: windows-2025
+            script: package:win
+            unsigned_args: --config.forceCodeSigning=false
+          - platform: mac
+            arch: x64
+            runner: macos-15-intel
+            script: package:mac
+            unsigned_args: --config.mac.identity=null --config.mac.hardenedRuntime=false
+          - platform: mac
+            arch: arm64
+            runner: macos-15
+            script: package:mac
+            unsigned_args: --config.mac.identity=null --config.mac.hardenedRuntime=false
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: 'true'
+      SIGNING_REQUESTED: ${{ inputs.sign == true || (github.event_name == 'push' && vars.REA_SIGN_RELEASES == 'true') }}
+      RELEASE_PLATFORM: ${{ matrix.platform }}
+      RELEASE_ARCH: ${{ matrix.arch }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install exact Node runtime
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.19.0'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: |
+          npm ci --include=optional
+          # Optional native bindings can be omitted after a transient registry/cache
+          # failure. Retry the exact lockfile once and require a working build runtime.
+          if ! node --input-type=module -e 'await Promise.all([import("vite"), import("esbuild")])'; then
+            npm ci --include=optional --prefer-online
+            node --input-type=module -e 'await Promise.all([import("vite"), import("esbuild")])'
+          fi
+
+      - name: Typecheck shared workspace
+        run: npm run typecheck
+
+      - name: Test shared engine and desktop contracts
+        run: npm test
+
+      - name: Build desktop and shared workspace
+        run: npm run build
+
+      - name: Check public source and application contents
+        run: npm run check:release
+
+      - name: Require tag to match package version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const metadata = JSON.parse(fs.readFileSync('standalone/package.json', 'utf8'));
+          if (process.env.RELEASE_TAG !== `v${metadata.version}`) {
+            throw new Error('Release tag must match standalone/package.json version.');
+          }
+          NODE
+
+      - name: Package without publisher signing
+        if: matrix.platform == 'linux' || env.SIGNING_REQUESTED != 'true'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run ${{ matrix.script }} -w @rea-workbench/standalone -- --${{ matrix.arch }} --publish never ${{ matrix.unsigned_args }}
+
+      - name: Package signed Windows installers
+        if: matrix.platform == 'win' && env.SIGNING_REQUESTED == 'true'
+        env:
+          WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          node -e "for (const name of ['WIN_CSC_LINK','WIN_CSC_KEY_PASSWORD']) if (!process.env[name]) throw new Error('Missing required signing secret: ' + name)"
+          npm run package:win -w @rea-workbench/standalone -- --x64 --publish never --config.forceCodeSigning=true
+
+      - name: Package signed and notarized macOS installers
+        if: matrix.platform == 'mac' && env.SIGNING_REQUESTED == 'true'
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          node -e "for (const name of ['CSC_LINK','CSC_KEY_PASSWORD','APPLE_ID','APPLE_APP_SPECIFIC_PASSWORD','APPLE_TEAM_ID']) if (!process.env[name]) throw new Error('Missing required signing or notarization secret: ' + name)"
+          npm run package:mac -w @rea-workbench/standalone -- --${{ matrix.arch }} --publish never --config.forceCodeSigning=true
+
+      - name: Verify packaged engine runtime
+        run: npm run smoke:package
+
+      - name: Verify Windows signatures
+        if: matrix.platform == 'win' && env.SIGNING_REQUESTED == 'true'
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem -Path release -Filter *.exe
+          if ($installers.Count -lt 2) { throw 'Expected setup and portable installers.' }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature -FilePath $installer.FullName
+            if ($signature.Status -ne 'Valid') { throw "Invalid publisher signature: $($installer.Name)" }
+          }
+
+      - name: Verify macOS signatures and notarization tickets
+        if: matrix.platform == 'mac' && env.SIGNING_REQUESTED == 'true'
+        run: |
+          find release -maxdepth 2 -name '*.app' -print0 | while IFS= read -r -d '' bundle; do
+            codesign --verify --deep --strict "$bundle"
+            xcrun stapler validate "$bundle"
+          done
+          test -n "$(find release -maxdepth 2 -name '*.app' -print -quit)"
+
+      - name: Verify unsigned macOS ad hoc signature
+        if: matrix.platform == 'mac' && env.SIGNING_REQUESTED != 'true'
+        run: |
+          find release -maxdepth 2 -name '*.app' -print0 | while IFS= read -r -d '' bundle; do
+            codesign --verify --deep --strict "$bundle"
+            codesign --display --verbose "$bundle" 2>&1 | grep -q 'Signature=adhoc'
+          done
+          test -n "$(find release -maxdepth 2 -name '*.app' -print -quit)"
+
+      - name: Record checksums and signing status
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import crypto from 'node:crypto';
+          const platform = process.env.RELEASE_PLATFORM;
+          const arch = process.env.RELEASE_ARCH;
+          const expected = { linux: ['.tar.gz', '.AppImage'], win: ['-setup.exe', '-portable.exe'], mac: ['.dmg', '.zip'] }[platform];
+          const files = fs.readdirSync('release').filter(name => fs.statSync(path.join('release', name)).isFile() && expected.some(extension => name.endsWith(extension)));
+          for (const extension of expected) if (!files.some(name => name.endsWith(extension))) throw new Error(`Missing installer ${extension}`);
+          const lines = files.sort().map(name => `${crypto.createHash('sha256').update(fs.readFileSync(path.join('release', name))).digest('hex')}  ${name}`);
+          fs.writeFileSync(`release/SHA256SUMS-${platform}-${arch}.txt`, `${lines.join('\n')}\n`);
+          const signing = platform === 'linux' || process.env.SIGNING_REQUESTED !== 'true'
+            ? (platform === 'mac' ? 'ad-hoc signature; no publisher certificate; not notarized' : 'unsigned; no publisher certificate')
+            : (platform === 'mac' ? 'publisher signature and notarization ticket verified' : 'publisher signature verified');
+          fs.writeFileSync(`release/BUILD-${platform}-${arch}.json`, `${JSON.stringify({ sourceCommit: process.env.SOURCE_SHA, platform, arch, signing, files }, null, 2)}\n`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${platform} ${arch}\n\n${signing}.\n\n${files.map(name => `- ${name}`).join('\n')}\n`);
+          NODE
+
+      - name: Upload installers and provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rea-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          path: |
+            release/*.tar.gz
+            release/*.AppImage
+            release/*-setup.exe
+            release/*-portable.exe
+            release/*.dmg
+            release/*.zip
+            release/SHA256SUMS-*.txt
+            release/BUILD-*.json
+            release/SMOKE-*.json
+
+  draft-release:
+    name: Assemble reviewed draft release
+    needs: desktop
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download every platform artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rea-desktop-*
+          merge-multiple: true
+          path: release-candidates
+
+      - name: Create or update draft only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          cat > release-notes.md <<'NOTES'
+          REA Workbench desktop release candidates for Linux, Windows, and macOS.
+
+          Review each BUILD-<platform>-<arch>.json for its recorded signing status and SHA256SUMS file for download identity. Outputs built without publisher credentials are explicitly unsigned; macOS candidates use ad hoc signing and are not notarized in that mode.
+
+          This release remains a draft. Install and exercise each packaged app on its operating system, review engine readiness and limitations, and publish manually after acceptance.
+          NOTES
+          if gh release view "$RELEASE_TAG" --json isDraft > existing-release.json 2>/dev/null; then
+            node -e "if (!JSON.parse(require('fs').readFileSync('existing-release.json','utf8')).isDraft) throw new Error('Refusing to modify an already published release.')"
+            gh release upload "$RELEASE_TAG" release-candidates/* --clobber
+            gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" release-candidates/* --verify-tag --draft --title "REA Workbench $RELEASE_TAG" --notes-file release-notes.md
+          fi

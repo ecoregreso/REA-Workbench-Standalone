@@ -1,0 +1,75 @@
+{
+  "name": "@rea-workbench/standalone",
+  "version": "0.2.0",
+  "private": true,
+  "description": "REA desktop analysis workbench",
+  "author": "REA Workbench contributors",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node ../scripts/build.mjs",
+    "start": "node ../scripts/start.mjs",
+    "package:linux": "electron-builder --linux tar.gz AppImage",
+    "package:win": "electron-builder --win nsis portable",
+    "package:mac": "electron-builder --mac dmg zip",
+    "dev": "node ../scripts/dev.mjs"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@xterm/xterm": "5.5.0",
+    "rea-agents": "6.4.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "build": {
+    "appId": "com.reaworkbench.desktop",
+    "productName": "REA Workbench",
+    "executableName": "rea-workbench",
+    "asar": false,
+    "directories": {
+      "output": "../release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "artifactName": "REA-Workbench-${version}-${os}-${arch}.${ext}",
+    "linux": {
+      "category": "Development",
+      "target": [
+        "tar.gz",
+        "AppImage"
+      ],
+      "icon": "icon.png"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "REA-Workbench-${version}-win-${arch}-setup.exe"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "icon": "icon.png"
+    },
+    "portable": {
+      "artifactName": "REA-Workbench-${version}-win-${arch}-portable.exe"
+    },
+    "afterPack": "./build/afterPack.cjs"
+  }
+}
